@@ -1,0 +1,102 @@
+---
+# file: gator/.git/workflows/notify-discord.yml
+# author: ilulillirillion
+# date: 07/22/2024
+
+# Name the workflow 'Discord Notification' (visible in the GitHub Actions tab).
+name: Discord Notification
+
+# Specify that this workflow should run whenever a push to any branch happens.
+on: [push]
+
+# Define all jobs for this workflow.
+jobs:
+  # Define a notify job.
+  notify:
+    # Use `ubuntu-latest` as the runner for its common presence and 
+    # versatility.
+    runs-on: ubuntu-latest
+
+    # Define all steps for this job.
+    steps:
+      # First, define a step to check out the repository code.
+      - name: Checkout code
+        # Check out the repo using the version 3 `checkout` action -- this is
+        # crucial for accessing the repository contents.
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0  # Fetch all history for all branches and tags
+
+      # Force fetch tags to reference tag messages while in a shallow clone.
+      # TODO: Don't have to do this for the non-tag pipeline
+      - name: Fetch tags
+        run: git fetch --tags --force
+
+      # Determine what type of push is happening by checking the push details
+      # and set environment variables for use later.
+      - name: Annotate push details
+        run: |
+          if [[ ${{ github.ref }} == refs/tags/* ]]; then
+            echo "IS_TAG=true" >> $GITHUB_ENV
+            echo "REF_NAME=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
+            echo "TAG_MESSAGE=$(git for-each-ref --format='%(contents:subject)' ${{ github.ref }})" >> $GITHUB_ENV
+            echo "TAG_COMMIT=$(git rev-list -n 1 ${{ github.ref }})" >> $GITHUB_ENV
+          else
+            echo "IS_TAG=false" >> $GITHUB_ENV
+            echo "REF_NAME=${GITHUB_REF#refs/heads/}" >> $GITHUB_ENV
+            echo "COMMIT_MESSAGE<<EOF" >> $GITHUB_ENV
+            git log --format=%B -n 1 ${{ github.sha }} >> $GITHUB_ENV
+            echo "EOF" >> $GITHUB_ENV
+            echo "CHANGED_FILES<<EOF" >> $GITHUB_ENV
+            git diff-tree --no-commit-id --name-status -r ${{ github.sha }} | sed 's/^/- /' >> $GITHUB_ENV
+            echo "EOF" >> $GITHUB_ENV
+          fi
+      # Get the commit message for the pushed commit
+      - name: Get commit message
+        if: env.IS_TAG != 'true'
+        run: |
+          # Store commit message in an environment variable, handling multi-line content
+          echo "COMMIT_MESSAGE<<EOF" >> $GITHUB_ENV
+          git log --format=%B -n 1 ${{ github.sha }} >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+
+      # Get a list of changed files along with their status
+      - name: Get changed files
+        if: env.IS_TAG != 'true'
+        run: |
+          # Store changed files in an environment variable, handling multi-line content
+          echo "CHANGED_FILES<<EOF" >> $GITHUB_ENV
+          git diff-tree --no-commit-id --name-status -r ${{ github.sha }} | sed 's/^/- /' >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+
+      - name: Print debug information
+        run: |
+          cat "${GITHUB_ENV}"
+
+      # Next, define a step which will dispatch a Discord notification
+      - name: Discord notification
+        # Set up environment variables.
+        env:
+          # Retrieve the Discord webhook URL from the repository secrets
+          # (repository secrets are managed via GitHub's web interface).
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+        
+        # Use the latest version of the Ilshidur/action-discord action to
+        # dispatch notifications to Discord easily.
+        uses: Ilshidur/action-discord@master
+        
+        # Specify input parameters for the Discord action
+        with:
+          # Define the message contents which will be dispatched to Discord.
+          # `EVENT_PAYLOAD.repository.full_name` is a variable containing the 
+          # repository name. Use environment variables set in previous steps
+          # to format the message appropriately.
+          args: |
+            ${{ env.IS_TAG == 'true' && 'A new tag was pushed' || 'A new commit was pushed' }} to {{ EVENT_PAYLOAD.repository.full_name }}
+            ${{ format('Pusher: {0}', github.actor) }}
+            ${{ env.IS_TAG == 'true' && format('Tag: {0}', env.REF_NAME) || format('Branch: {0}', env.REF_NAME) }}
+            ${{ env.IS_TAG == 'true' && env.TAG_MESSAGE != '' && format('Tag Message: {0}', env.TAG_MESSAGE) || '' }}
+            ${{ env.IS_TAG == 'true' && format('Associated Commit: {0}', env.TAG_COMMIT) || format('Commit: {0}', github.sha) }}
+            ${{ env.IS_TAG != 'true' && format('Commit Message: {0}', env.COMMIT_MESSAGE) || '' }}
+            ${{ env.IS_TAG != 'true' && 'Changed Files:' || '' }}
+            ${{ env.IS_TAG != 'true' && env.CHANGED_FILES || '' }}
